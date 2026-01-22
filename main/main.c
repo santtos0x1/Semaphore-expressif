@@ -2,9 +2,10 @@
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 //#include "esp_log.h"
 
-#define STACK_SIZE 1024
+#define STACK_SIZE 2048
 
 gpio_config_t red_led_io_conf = {
     // 00000...000000010000000000000000
@@ -48,30 +49,44 @@ typedef struct {
     uint8_t btn_pin;
 } gpio_pinout;
 
-static const char* TAG = "runtime";
+static uint64_t last_btn_time = 0;
 
 void vTaskCode( void * pvParameters )
 {
     gpio_pinout* pins = ( gpio_pinout* ) pvParameters;
-    const TickType_t xLdelay = 100;
-    const TickType_t xHdelay = 3000;
+    const TickType_t xHdelay = 300;
 
     // Task
     for( ;; )
     {
         gpio_set_level( ( gpio_num_t )pins->grn_led_pin, 1 );
 
-        if(gpio_get_level( ( gpio_num_t )pins->btn_pin ) == 0 )
+        if( ulTaskNotifyTake( pdTRUE, portMAX_DELAY ) )
         {
-            gpio_set_level( ( gpio_num_t )pins->grn_led_pin, 0 );
-            gpio_set_level( ( gpio_num_t )pins->red_led_pin, 1 );
-            
-            vTaskDelay( xHdelay );
+            int64_t now = esp_timer_get_time();
+            if(( now - last_btn_time ) > 200000 )
+            {
+                last_btn_time = now; 
 
-            gpio_set_level( ( gpio_num_t )pins->red_led_pin, 0 );
-            gpio_set_level( ( gpio_num_t )pins->grn_led_pin, 1 );
+                gpio_set_level( ( gpio_num_t )pins->grn_led_pin, 0 );
+                gpio_set_level( ( gpio_num_t )pins->red_led_pin, 1 );
+                
+                vTaskDelay( xHdelay );
+
+                gpio_set_level( ( gpio_num_t )pins->red_led_pin, 0 );
+                gpio_set_level( ( gpio_num_t )pins->grn_led_pin, 1 );
+            }
         }
     }
+}
+
+void IRAM_ATTR vISRHandler(void * args)
+{
+    TaskHandle_t taskToNotify = ( TaskHandle_t ) args;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    vTaskNotifyGiveFromISR(taskToNotify, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 void taskBuilder( void )
@@ -86,6 +101,7 @@ void taskBuilder( void )
     TaskHandle_t xHandle = NULL;
 
     xTaskCreate( vTaskCode, "Led HIGH", STACK_SIZE, &pinout, tskIDLE_PRIORITY, &xHandle );
+    gpio_isr_handler_add( pinout.btn_pin, vISRHandler, ( void * )xHandle );
 }
 
 void app_main( void )
@@ -94,6 +110,8 @@ void app_main( void )
     gpio_config( &yel_led_io_conf );
     gpio_config( &grn_led_io_conf );
     gpio_config( &btn_io_conf );
+
+    gpio_install_isr_service(0);
 
     taskBuilder();
 }
